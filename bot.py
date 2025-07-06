@@ -1,127 +1,163 @@
 import os
+import time
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from yt_dlp import YoutubeDL
-from helpers import download_video, generate_thumbnail, progress, downstatus, upstatus
+import logging
+import requests
+import yt_dlp
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler,
+    MessageHandler, CallbackQueryHandler, filters, ContextTypes
+)
+from config import BOT_TOKEN
 
-API_ID = 1234567
-API_HASH = "your_api_hash"
-BOT_TOKEN = "your_bot_token"
+logging.basicConfig(level=logging.INFO)
+TEMP_DIR = "downloads"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-app = Client("yt_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ⏳ Download progress hook (every 5 sec)
+def download_hook(d):
+    if d['status'] == 'downloading':
+        current = time.time()
+        last = d.get('last_update', 0)
+        if current - last >= 5:
+            d['last_update'] = current
+            context = d.get('context')
+            percent = d.get('_percent_str', '').strip()
+            if context:
+                asyncio.run_coroutine_threadsafe(
+                    context['msg'].edit_text(f"📥 Downloading to server: {percent}"),
+                    context['loop']
+                )
 
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply_text("👋 Send a YouTube video or playlist link.\nI'll let you choose a resolution and download it.")
-
-@app.on_message(filters.regex(r"(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+"))
-async def handle_youtube(client, message):
-    url = message.text.strip()
-    ydl_opts = {'quiet': True, 'extract_flat': False}
-    if os.path.exists("cookies.txt"):
-        ydl_opts["cookiefile"] = "cookies.txt"
-
+# 🖼 Download official YouTube thumbnail
+def download_thumbnail(url, title):
     try:
-        with YoutubeDL(ydl_opts) as ydl:
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return None
+        filename = os.path.join(TEMP_DIR, f"{title}_thumb.jpg")
+        with open(filename, 'wb') as f:
+            f.write(response.content)
+        if os.path.getsize(filename) > 200 * 1024:
+            return None
+        return filename
+    except Exception as e:
+        print(f"Thumbnail error: {e}")
+        return None
+
+# 📦 /start handler
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Send a YouTube video link to begin.")
+
+# 🔗 Handle YouTube URL
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    ydl_opts = {"quiet": True}
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
-        return await message.reply(f"❌ Error: {e}")
+        await update.message.reply_text(f"❌ Failed to fetch video info.\n{e}")
+        return
 
-    if 'entries' in info:  # Playlist
-        videos = info['entries']
-        count = len(videos)
-        status_msg = await message.reply(f"📃 Playlist detected with {count} videos. Starting download...")
-        for i, entry in enumerate(videos, 1):
-            try:
-                video_url = entry['url']
-                title = entry.get("title", f"Video {i}")
-                await status_msg.edit(f"📥 Downloading video {i}/{count}:\n`{title}`")
-                smsg = await message.reply("🔄 Preparing download...")
-                asyncio.create_task(downstatus(client, f"{smsg.id}downstatus.txt", smsg, message.chat.id))
-                filename, real_title = await download_video(video_url, "360p", smsg, prefix=f"{i:02d}_")
-                os.remove(f"{smsg.id}downstatus.txt")
-                thumb = await generate_thumbnail(video_url)
-                asyncio.create_task(upstatus(client, f"{smsg.id}upstatus.txt", smsg, message.chat.id))
-                await client.send_video(
-                    chat_id=message.chat.id,
-                    video=filename,
-                    caption=real_title,
-                    thumb=thumb,
-                    supports_streaming=True,
-                    progress=progress,
-                    progress_args=(smsg, "up")
-                )
-                os.remove(filename)
-                if thumb and os.path.exists(thumb):
-                    os.remove(thumb)
-                os.remove(f"{smsg.id}upstatus.txt")
-                await smsg.delete()
-            except Exception as e:
-                await message.reply(f"❌ Failed to download video {i}: {e}")
-        return await status_msg.edit("✅ All playlist videos downloaded.")
-
-    # Single video
+    title = info.get("title", "Video")
     formats = info.get("formats", [])
     buttons = []
-    seen = set()
+
     for f in formats:
-        if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height"):
-            label = f"{f['height']}p"
-            if label not in seen:
-                seen.add(label)
-                buttons.append([InlineKeyboardButton(label, callback_data=f"{label}|{url}")])
-    await message.reply_text(
-        f"🎞️ **{info.get('title')}**\nSelect the resolution to download:",
-        reply_markup=InlineKeyboardMarkup(buttons)
+        f_id = f['format_id']
+        ext = f['ext']
+        height = f.get('height')
+        abr = f.get('abr')
+        size = f.get('filesize') or f.get('filesize_approx')
+        size_mb = f"{round(size / (1024 * 1024), 2)}MB" if size else "?"
+        label = ""
+
+        if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
+            label = f"📹🔊 {height or 'Auto'}p | {size_mb}"
+        elif f.get('vcodec') != 'none':
+            label = f"📹 {height}p | {size_mb}"
+        elif f.get('acodec') != 'none':
+            label = f"🔊 {abr} kbps | {size_mb}"
+        else:
+            continue
+
+        buttons.append([InlineKeyboardButton(label, callback_data=f"{f_id}|{url}")])
+
+    if not buttons:
+        await update.message.reply_text("❌ No downloadable formats found.")
+        return
+
+    markup = InlineKeyboardMarkup(buttons[:30])
+    await update.message.reply_text(
+        f"🎬 *{title}*\nChoose a format:",
+        reply_markup=markup,
+        parse_mode='Markdown'
     )
 
-@app.on_callback_query(filters.regex(r"^(\d{3}p)\|(.+)"))
-async def format_selected(client, callback_query):
-    resolution, url = callback_query.data.split("|")
-    await callback_query.answer(f"Selected {resolution}")
-    smsg = await callback_query.message.reply("📥 Starting download...")
-    asyncio.create_task(downstatus(client, f"{smsg.id}downstatus.txt", smsg, callback_query.message.chat.id))
+# ▶️ Handle Format Button Click
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)  # Remove buttons
+
+    fmt_id, url = query.data.split('|')
+    msg = await query.message.reply_text("📥 Starting download...")
+
+    out_path = os.path.join(TEMP_DIR, "%(title)s.%(ext)s")
+
+    ydl_opts = {
+        "format": f"{fmt_id}+bestaudio/best",
+        "outtmpl": out_path,
+        "merge_output_format": "mp4",
+        "progress_hooks": [download_hook],
+        "quiet": True,
+    }
+
+    loop = asyncio.get_event_loop()
+    ydl_opts["progress_hooks"][0].__dict__["context"] = {"msg": msg, "loop": loop}
+
     try:
-        filename, title = await download_video(url, resolution, smsg)
-        os.remove(f"{smsg.id}downstatus.txt")
-        thumb = await generate_thumbnail(url)
-        asyncio.create_task(upstatus(client, f"{smsg.id}upstatus.txt", smsg, callback_query.message.chat.id))
-        await client.send_video(
-            chat_id=callback_query.message.chat.id,
-            video=filename,
-            caption=title,
-            thumb=thumb,
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url)
+        filename = ydl.prepare_filename(info)
+        final_file = filename if filename.endswith(".mp4") else filename + ".mp4"
+
+        # Download thumbnail
+        thumb_path = download_thumbnail(info.get("thumbnail"), info.get("title", "thumb"))
+
+        # Upload progress every 5 seconds (estimated)
+        await msg.edit_text("📤 Uploading to Telegram: 0%")
+        await context.bot.send_video(
+            chat_id=query.message.chat_id,
+            video=open(final_file, 'rb'),
+            thumb=open(thumb_path, 'rb') if thumb_path else None,
             supports_streaming=True,
-            progress=progress,
-            progress_args=(smsg, "up")
+            caption=f"✅ {info['title']}"
         )
-        os.remove(filename)
-        if thumb and os.path.exists(thumb):
-            os.remove(thumb)
-        os.remove(f"{smsg.id}upstatus.txt")
-        await smsg.delete()
+
+        await msg.edit_text("✅ Done!")
+
     except Exception as e:
-        await smsg.edit(f"❌ Download error: {e}")
+        await msg.edit_text(f"❌ Error: {e}")
+    finally:
+        try:
+            os.remove(final_file)
+            if thumb_path:
+                os.remove(thumb_path)
+        except:
+            pass
 
-@app.on_message(filters.command(["add"]))
-async def add_cookies(client, message):
-    await message.reply_text("📤 Send `cookies.txt` as a file.")
-
-@app.on_message(filters.document & filters.private)
-async def receive_file(client, message):
-    if message.document.file_name == "cookies.txt":
-        path = await message.download()
-        os.rename(path, "cookies.txt")
-        await message.reply("✅ `cookies.txt` saved.")
-
-@app.on_message(filters.command(["rm"]))
-async def rm_cookies(client, message):
-    if os.path.exists("cookies.txt"):
-        os.remove("cookies.txt")
-        await message.reply("✅ `cookies.txt` removed.")
-    else:
-        await message.reply("❌ No cookies.txt found.")
-
-app.run()
-            
+# 🚀 Run Bot
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(handle_button))
+    print("🤖 Bot is running...")
+    app.run_polling()
+    
