@@ -9,9 +9,9 @@ from yt_dlp import YoutubeDL
 
 # Load credentials
 load_dotenv()
-API_ID=
-API_HASH=""
-BOT_TOKEN=""
+API_ID = 15523035
+API_HASH = '33a37e968712427c2e7971cb03f341b3'
+BOT_TOKEN = '1980052148:AAHZyC-efejzwWWWk90J-r_kjqvgJtPDfFk'
 
 # Create client
 app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -82,7 +82,7 @@ async def yt_handler(_, msg):
 
     # 🖼 Get thumbnail (YouTube or fallback)
     thumb_bytes = get_thumbnail(url)
-    fallback_path = "downloads/default.jpg"
+    fallback_path = "default.jpg"
     thumb_input = thumb_bytes if thumb_bytes else open(fallback_path, 'rb')
 
     await msg.reply_photo(
