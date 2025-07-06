@@ -9,7 +9,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler,
     MessageHandler, CallbackQueryHandler, filters, ContextTypes
 )
-from config import BOT_TOKEN
+BOT_TOKEN = "1980052148:AAHZyC-efejzwWWWk90J-r_kjqvgJtPDfFk"
 
 logging.basicConfig(level=logging.INFO)
 TEMP_DIR = "downloads"
