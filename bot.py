@@ -9,9 +9,9 @@ from yt_dlp import YoutubeDL
 
 # Load credentials
 load_dotenv()
-API_ID = 15523035
-API_HASH = '33a37e968712427c2e7971cb03f341b3'
-BOT_TOKEN = '1980052148:AAHZyC-efejzwWWWk90J-r_kjqvgJtPDfFk'
+API_ID = 
+API_HASH = ''
+BOT_TOKEN = ''
 
 # Create client
 app = Client("ytbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
