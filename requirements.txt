@@ -1,3 +1,5 @@
-python-telegram-bot==20.6
-yt-dlp
-requests
+pyrogram==2.0.106
+tgcrypto==1.2.5
+yt-dlp==2024.04.09
+aiohttp==3.9.5
+ffmpeg-python==0.2.0
